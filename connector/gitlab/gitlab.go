@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"golang.org/x/oauth2"
 
@@ -19,7 +20,9 @@ import (
 
 const (
 	// read operations of the /api/v4/user endpoint
-	scopeUser = "read_user"
+	scopeUser    = "read_user"
+	scopeApi     = "api"
+	scopeReadApi = "read_api"
 	// used to retrieve groups from /oauth/userinfo
 	// https://docs.gitlab.com/ee/integration/openid_connect_provider.html
 	scopeOpenID = "openid"
@@ -83,9 +86,9 @@ type gitlabConnector struct {
 }
 
 func (c *gitlabConnector) oauth2Config(scopes connector.Scopes) *oauth2.Config {
-	gitlabScopes := []string{scopeUser}
+	gitlabScopes := []string{scopeUser, scopeApi, scopeReadApi}
 	if c.groupsRequired(scopes.Groups) {
-		gitlabScopes = []string{scopeUser, scopeOpenID}
+		gitlabScopes = []string{scopeUser, scopeApi, scopeReadApi, scopeOpenID}
 	}
 
 	gitlabEndpoint := oauth2.Endpoint{AuthURL: c.baseURL + "/oauth/authorize", TokenURL: c.baseURL + "/oauth/token"}
@@ -161,6 +164,13 @@ func (c *gitlabConnector) HandleCallback(s connector.Scopes, r *http.Request) (i
 		groups, err := c.getGroups(ctx, client, s.Groups, user.Username)
 		if err != nil {
 			return identity, fmt.Errorf("gitlab: get groups: %v", err)
+		}
+		projects, err := c.userProjects(ctx, client)
+		if err != nil {
+			return identity, fmt.Errorf("gitlab: get projects: %v", err)
+		}
+		for i := 0; i < len(projects); i++ {
+			groups = append(groups, projects[i])
 		}
 		identity.Groups = groups
 	}
@@ -297,4 +307,39 @@ func (c *gitlabConnector) getGroups(ctx context.Context, client *http.Client, gr
 	}
 
 	return nil, nil
+}
+
+func (c *gitlabConnector) userProjects(ctx context.Context, client *http.Client) ([]string, error) {
+	url := c.baseURL + "/api/v4/projects"
+	req, _ := http.NewRequest("GET", url, nil)
+	req = req.WithContext(ctx)
+
+	resp, _ := client.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("gitlab: read body: %v", err)
+		}
+		return nil, fmt.Errorf("%s: %s", resp.Status, body)
+	}
+
+	var prolist []map[string]interface{}
+	bodyByte, _ := io.ReadAll(resp.Body)
+	err := json.Unmarshal([]byte(bodyByte), &prolist)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	projects := make([]string, len(prolist))
+	for i := 0; i < len(prolist); i++ {
+		projects[i] = fmtProjectName(prolist[i]["name_with_namespace"].(string))
+	}
+	return projects, nil
+}
+
+func fmtProjectName(name string) string {
+	element := strings.Split(name, "/")
+	return fmt.Sprintf("%s/%s",
+		strings.TrimSpace(element[0]),
+		strings.TrimSpace(element[1]))
 }
